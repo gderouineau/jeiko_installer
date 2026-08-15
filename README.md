@@ -183,6 +183,29 @@ problème, et le script refuse de publier s'il détecte un doublon côté source
 
 ## Mettre à jour un site
 
+### Récupérer le dernier installeur sur le serveur
+
+Les commandes `jeiko-*-update` s'exécutent depuis l'outillage **déjà déposé** sur
+la machine : elles lisent leurs gabarits (nginx, unités systemd, scripts d'étape)
+dans `/usr/local/share/jeiko`, pas depuis un dossier d'installeur. Après avoir
+publié une nouvelle version de l'installeur, rafraîchis d'abord cet outillage,
+sinon la convergence rejoue les anciens gabarits :
+
+```bash
+sudo apt-get install -y curl unzip
+cd /var/www
+sudo curl -fL -o jeiko-installer.zip \
+  https://raw.githubusercontent.com/gderouineau/jeiko_installer/main/jeiko-installer-latest.zip
+sudo unzip -o jeiko-installer.zip -d jeiko-installer
+cd jeiko-installer
+sudo ./migrate_site.sh --tools-only    # dépose les nouveaux gabarits/scripts, sans toucher aux sites
+```
+
+Un site jamais amorcé sur ce schéma (installé avant l'installeur v2) :
+`sudo ./migrate_site.sh <site>` à la place — voir « Migrer un site existant ».
+
+### Mettre à jour le package (côté client)
+
 Depuis l'interface : **Administration ▸ Mettre à jour JEIKO**. La page affiche
 le journal en direct et survit au redémarrage du site.
 
@@ -215,6 +238,20 @@ sudo jeiko-server-update --list        # sites enregistrés
 
 Idempotent : le relancer sur un site déjà à jour ne change rien. Sauvegarde
 avant, `nginx -t` avant rechargement, restauration si le test échoue.
+
+**Ce que la convergence serveur couvre — et ne couvre pas.** Elle n'est *pas*
+une réinstallation. Elle régénère toute la *configuration serveur du site* à
+partir des **mêmes scripts d'étape** que l'installation (unité gunicorn `10`,
+nginx `11`, TLS `12`, sauvegardes `13`), plus les unités systemd, le sudoers,
+les permissions, les clés `.env` requises et les timers cron : un site déjà en
+place converge donc vers **la même configuration qu'une install neuve
+produirait**. Elle ne réinstalle **pas** la stack partagée (PostgreSQL,
+memcached, venv), ne recrée ni la base ni le compte système, et ne rejoue pas
+le durcissement (`01`) — ce sont des opérations d'installation, destructrices ou
+inutiles sur un site vivant. Le package, `settings.py`/`urls.py` et les
+migrations relèvent de la **maj client** (`--with-client` ou
+`jeiko-client-update`). En clair : **maj serveur + maj client = tout à jour** ;
+la maj serveur seule ne suffit que pour de la configuration serveur pure.
 
 ---
 
