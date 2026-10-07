@@ -218,6 +218,12 @@ sudo jeiko-client-update monsite --force     # réinstalle la même version
 sudo jeiko-client-update monsite --rollback  # revient à la version précédente
 ```
 
+**Le serveur d'abord.** La mise à jour du package est refusée tant que le
+site n'a pas été convergé avec l'installeur publié : un package récent peut
+attendre une configuration serveur qui n'existe pas encore. Le message dit quoi
+faire (Mises à jour ▸ Serveur, ou `sudo jeiko-maj --serveur monsite`).
+`--ignorer-serveur` lève ce contrôle, en terminal seulement.
+
 Déroulé : manifeste → vérification sha256 → dump PostgreSQL → installation →
 réalignement de `settings.py` et `urls.py` → `django check` → migrations →
 collectstatic → permissions → redémarrage → contrôle de santé. **Toute erreur
@@ -252,6 +258,40 @@ inutiles sur un site vivant. Le package, `settings.py`/`urls.py` et les
 migrations relèvent de la **maj client** (`--with-client` ou
 `jeiko-client-update`). En clair : **maj serveur + maj client = tout à jour** ;
 la maj serveur seule ne suffit que pour de la configuration serveur pure.
+
+### La mise à jour automatique — `jeiko-maj`
+
+Chaque site peut cocher **« Mise à jour automatique »** (Mises à jour ▸
+Réglages, décochée par défaut). Chaque semaine, dans la nuit de dimanche à
+lundi (00:15–00:30, `jeiko-maj.timer`), si au moins un site de la machine l'a
+cochée :
+
+1. **le serveur** — si un installeur plus récent est publié : archive
+   vérifiée (sha256 du `version.json` du dépôt de l'installeur), outillage
+   déposé par son `migrate_site.sh --tools-only`, puis chaque site convergé
+   **un par un, avec arrêt au premier échec** (un installeur fautif ne touche
+   qu'un site, que sa convergence remet en état) ;
+2. **les sites** — ensuite seulement, et si l'étape 1 a réussi : le package de
+   chaque site coché, s'il est en retard, puis ses timers. Un site en échec
+   revient à son état d'avant et n'arrête pas les autres.
+
+Rien ne commence après 03:45 (le redémarrage automatique de Debian tombe à
+04:20) : ce qui n'est pas atteint passe la semaine suivante. Une passe
+interrompue reprend là où elle s'est arrêtée — chaque site garde la version de
+l'installeur avec laquelle il a été convergé.
+
+Un site peut aussi demander l'étape serveur seule (Mises à jour ▸ Serveur ▸
+« Mettre à jour le serveur ») : `jeiko-maj-serveur@<site>.service`. Elle ne fait
+rien si le serveur est à jour, et concerne tous les sites de la machine.
+
+```bash
+sudo jeiko-maj --simulation          # dit ce que ferait la passe, ne touche à rien
+sudo jeiko-maj --serveur monsite     # l'étape serveur, comme le bouton
+sudo jeiko-maj --hebdo --sans-limite # la passe complète, hors de la fenêtre
+```
+
+État lu par les administrations : `/var/lib/jeiko/maj-serveur.state`. Journal
+complet (il nomme tous les sites) : `/var/log/jeiko/maj-serveur.log`, root seul.
 
 ---
 
@@ -309,7 +349,11 @@ INSTALLER/
 ├── updater/
 │   ├── jeiko-server-update       → /usr/local/sbin/  (root:root) — terminal
 │   ├── jeiko-client-update       → /usr/local/sbin/  (root:root) — interface
-│   └── jeiko-update@.service     → /etc/systemd/system/
+│   ├── jeiko-maj                 → /usr/local/sbin/  (root:root) — mise à jour automatique
+│   ├── jeiko-update@.service     → /etc/systemd/system/
+│   ├── jeiko-maj.service, .timer → /etc/systemd/system/  (chaque semaine)
+│   └── jeiko-maj-serveur@.service → /etc/systemd/system/ (bouton d'un site)
+├── tests/                        bancs d'essai (macOS) — non publiés
 ├── scripts/                      étapes 00 à 14
 └── templates/
     ├── settings.template.py      SOURCE UNIQUE — recopiée dans le package
@@ -327,6 +371,11 @@ Le script de publication, lui, vit avec le dossier de publication :
 | `/usr/local/lib/jeiko/common.sh` | bibliothèque partagée | `0644 root:root` |
 | `/usr/local/sbin/jeiko-server-update` | convergence serveur | `0755 root:root` |
 | `/usr/local/sbin/jeiko-client-update` | mise à jour du package | `0755 root:root` |
+| `/usr/local/sbin/jeiko-maj` | mise à jour automatique (serveur puis sites) | `0755 root:root` |
+| `/usr/local/share/jeiko/VERSION` | installeur dont l'outillage est déposé | `0644 root:root` |
+| `/var/lib/jeiko/<site>/serveur.version` | installeur avec lequel le site a été convergé | `0640 root:<site>` |
+| `/var/lib/jeiko/maj-serveur.state` | état de la dernière mise à jour serveur | `0644 root:root` |
+| `/var/log/jeiko/maj-serveur.log` | journal de la mise à jour serveur | `0640 root:root` |
 | `/usr/local/sbin/jeiko-verifier` | contrôle de santé quotidien | `0755 root:root` |
 | `/usr/local/sbin/jeiko-ssh-key` | ajout d'une clé + coupure du mot de passe | `0755 root:root` |
 | `/usr/local/sbin/jeiko-backup` / `-restore` | sauvegarde et restauration | `0700 root:root` |
@@ -334,7 +383,7 @@ Le script de publication, lui, vit avec le dossier de publication :
 | `/var/lib/jeiko/<site>/wheels/` | wheels conservés pour le rollback | `0750 root:root` |
 | `/var/lib/jeiko/<site>/update.state` | état lu par l'administration | `0640 root:<site>` |
 | `/var/log/jeiko/<site>/update.log` | journal de mise à jour | `0640 root:<site>` |
-| `/etc/sudoers.d/jeiko-<site>` | 2 commandes autorisées, rien d'autre | `0440 root:root` |
+| `/etc/sudoers.d/jeiko-<site>` | 3 commandes autorisées, rien d'autre | `0440 root:root` |
 
 ### Modèle de permissions
 
