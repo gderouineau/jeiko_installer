@@ -40,48 +40,12 @@ Le client ne touche jamais à la configuration serveur : un clic dans
 l'administration ne réécrit pas un vhost Nginx. Et comme c'est le script
 serveur qui met à jour le script client, ce dernier n'a pas besoin de vivre
 dans le package ni de se réécrire lui-même — ce qui supprime d'un coup
-l'auto-écrasement par pip et le chemin d'élévation par `site-packages`.
+l'auto-écrasement par pip.
 
 `settings.py` et `urls.py` voyagent **dans le package**
 (`jeiko/project_template/`). C'est ce qui permet à une version qui ajoute une
 application à `INSTALLED_APPS` d'arriver avec le `settings.py` qui la déclare :
 le client réaligne le fichier, sans terminal.
-
-### Faille corrigée au passage
-
-`site-packages` est inscriptible par l'utilisateur du site, et ce même
-utilisateur pouvait `sudo` un script qui s'y trouvait. Toute exécution de code
-dans Django (upload, désérialisation, dépendance compromise) donnait donc
-**root sur la machine en une étape**. C'est ce chemin qui disparaît.
-
-### Autres corrections
-
-- Le package est vérifié par **sha256** avant installation. Auparavant, une
-  archive était téléchargée puis construite et installée sans aucun contrôle.
-- **Rollback automatique** : dump PostgreSQL avant migration, wheel précédent
-  conservé, restauration si les migrations, les statiques ou le contrôle de
-  santé échouent.
-- `SECURE_SSL_REDIRECT` était à `True` en dur : répondre « n » à Let's Encrypt
-  produisait une boucle de redirection et un site inaccessible. Piloté par
-  `JEIKO_SSL` dans le `.env`.
-- Permissions unifiées. L'installation posait `2750/0640`, la mise à jour
-  `2775/0664` : chaque mise à jour rendait un peu plus de fichiers inscriptibles
-  par le groupe. Une seule implémentation désormais, dans `lib/jeiko-common.sh`.
-- `client_max_body_size` absent : tout upload de plus de 1 Mo renvoyait un 413
-  sans message côté application.
-- Le renouvellement Let's Encrypt reposait sur un vhost qui redirigeait
-  `/.well-known/acme-challenge/` en 301. Certbot passe désormais par `webroot`,
-  et le renouvellement est testé à l'installation.
-- Les secrets (`.env.<site>`, 0644, mot de passe PostgreSQL **et** mot de passe
-  superuser en clair) sont remplacés par `/etc/jeiko/sites/<site>.conf` en 0600
-  root:root, sans le mot de passe superuser qui ne sert qu'une fois.
-- Injection SQL possible via le mot de passe PostgreSQL (interpolé dans la
-  chaîne SQL) : passage par des variables `psql` et `format()`.
-- `/tmp/jeiko_latest.zip` en chemin fixe (collision entre sites, attaque par
-  lien symbolique) → `mktemp -d`.
-- Verrou `flock` : deux mises à jour simultanées corrompaient le venv.
-- Fail2ban activait un jail `nginx-req-limit` alors qu'aucune zone `limit_req`
-  n'existait dans Nginx : la protection était décorative. La zone est créée.
 
 ---
 
@@ -121,16 +85,17 @@ sudo ./migrate_site.sh monsite --dry-run  # montre sans rien modifier
 sudo ./migrate_site.sh monsite            # migration réelle, interactive
 ```
 
-Le script dumpe la base et sauvegarde toutes les configurations **avant** de
-toucher à quoi que ce soit, demande confirmation à chaque changement sensible
-(settings.py, vhost Nginx), teste `nginx -t` avant de recharger et restaure la
-configuration précédente si le test échoue. Tout est conservé dans
-`/var/backups/jeiko/<site>/migration_<horodatage>/`.
+Le script reconstitue la fiche du site, retire l'ancien mécanisme de mise à
+jour, puis passe la main à la convergence (`jeiko-server-update`), qui
+sauvegarde la configuration qu'elle modifie dans
+`/var/backups/jeiko/<site>/server-update_<horodatage>/`, teste `nginx -t`
+avant de recharger et restaure le vhost si le test échoue.
 
-Si le site ne répond plus après migration :
+La migration ne sauvegarde pas la base. Sur un serveur où l'outillage est
+déjà en place, faire d'abord une sauvegarde complète :
 
 ```bash
-sudo jeiko-restore monsite /var/backups/jeiko/monsite/migration_<horodatage>
+sudo jeiko-backup monsite
 ```
 
 ---
@@ -224,11 +189,20 @@ attendre une configuration serveur qui n'existe pas encore. Le message dit quoi
 faire (Mises à jour ▸ Serveur, ou `sudo jeiko-maj --serveur monsite`).
 `--ignorer-serveur` lève ce contrôle, en terminal seulement.
 
-Déroulé : manifeste → vérification sha256 → dump PostgreSQL → installation →
-réalignement de `settings.py` et `urls.py` → `django check` → migrations →
-collectstatic → permissions → redémarrage → contrôle de santé. **Toute erreur
-après l'installation déclenche un rollback** (wheel précédent réinstallé,
-gabarits restaurés, base restaurée si les migrations avaient tourné).
+Déroulé : manifeste → vérification sha256 (paquet et dépendances) → relevé
+des dépendances → installation → maintenance → dump PostgreSQL → réalignement de
+`settings.py` et `urls.py` → `django check` → migrations → collectstatic →
+permissions → redémarrage → contrôle de santé → tâches planifiées. **Toute
+erreur dès l'installation déclenche un retour arrière** (dépendances d'avant et
+wheel de la version installée réinstallés, gabarits restaurés, base restaurée
+si les migrations avaient tourné, statiques recollectés). Un retour arrière
+qui n'aboutit pas entièrement le dit.
+
+Le paquet s'installe site ouvert. Ensuite, du dump au redémarrage, le site
+passe en maintenance : ses tâches planifiées sont suspendues et nginx affiche
+sa page « indisponible » — rien ne s'écrit dans une base qu'un retour arrière
+pourrait restaurer. Les webhooks refusés pendant ce temps (Stripe) sont
+renvoyés par leur expéditeur. `jeiko-restore` procède de même.
 
 ### Mettre à jour la configuration serveur
 
@@ -269,10 +243,11 @@ cochée :
 1. **le serveur** — si un installeur plus récent est publié : archive
    vérifiée (sha256 du `version.json` du dépôt de l'installeur), outillage
    déposé par son `migrate_site.sh --tools-only`, puis chaque site convergé
-   **un par un, avec arrêt au premier échec** (un installeur fautif ne touche
-   qu'un site, que sa convergence remet en état) ;
+   **un par un** : un échec propre à un site n'arrête pas la passe, un site
+   que la convergence rend indisponible l'arrête net (un installeur fautif ne
+   touche qu'un site) ;
 2. **les sites** — ensuite seulement, et si l'étape 1 a réussi : le package de
-   chaque site coché, s'il est en retard, puis ses timers. Un site en échec
+   chaque site coché, s'il est en retard, avec ses timers. Un site en échec
    revient à son état d'avant et n'arrête pas les autres.
 
 Rien ne commence après 03:45 (le redémarrage automatique de Debian tombe à
@@ -305,19 +280,33 @@ sudo jeiko-restore monsite /var/backups/jeiko/monsite/daily/<horodatage>
 ```
 
 Chaque sauvegarde contient un dump PostgreSQL (vérifié par `pg_restore --list`),
-les médias, et les fichiers de configuration. Rétention : 30 jours.
+les médias, les fichiers de configuration et leurs empreintes. Rétention :
+30 jours. La copie hors site (`JEIKO_OFFSITE_TARGET` dans la fiche) chiffre
+avant l'envoi si une phrase secrète est configurée ; si elle ne peut pas
+chiffrer, elle n'envoie rien et la sauvegarde locale reste.
+
+`jeiko-restore` vérifie l'archive avant d'arrêter le site, arrête aussi ses
+tâches planifiées, puis restaure **la base et les médias**. La configuration
+reste dans `config.tar.gz` pour une reprise à la main ; le code garde sa
+version installée.
 
 ---
 
 ## Surveillance
 
 ```bash
+sudo jeiko-alertes           # une fois : où envoyer les alertes (serveur SMTP), puis un e-mail d'essai
 sudo jeiko-verifier          # à la demande
 ```
 
-Tourne aussi chaque jour à 7h30, journal dans `/var/log/jeiko/verification.log`.
+Tourne aussi chaque heure, journal dans `/var/log/jeiko/verification.log`.
 Contrôle le disque, la mémoire disponible, l'expiration des certificats, l'état
-des services et l'âge des sauvegardes.
+des services, chaque site tel qu'un visiteur le voit (à travers nginx) et l'âge
+des sauvegardes. Quand l'ensemble des problèmes change — un nouveau, un de
+moins, le retour à la normale —, un e-mail part, envoyé par le serveur
+lui-même : un site en panne ne peut pas prévenir. Un problème qui dure n'en
+renvoie pas un par heure. `sudo jeiko-alertes --voir` montre la configuration,
+`--essai` renvoie l'e-mail d'essai.
 
 Aucun de ces problèmes ne se signale de lui-même avant que le site ne tombe : un
 disque plein arrête les écritures PostgreSQL, un certificat expiré rend le
@@ -331,8 +320,9 @@ sudo jeiko-ssh-key 'ssh-ed25519 AAAA…'
 ```
 
 Installe la clé, coupe l'authentification par mot de passe, vérifie la
-configuration **avant** de recharger — impossible de s'enfermer dehors. Si le
-test échoue, rien n'est appliqué.
+configuration **avant** de recharger — si le test échoue, rien n'est appliqué —
+puis contrôle avec `sshd -T` ce que sshd applique réellement. Garder une
+session ouverte et essayer une nouvelle connexion avant de la fermer.
 
 ---
 
@@ -389,11 +379,12 @@ Le script de publication, lui, vit avec le dossier de publication :
 
 | Élément | Mode | Pourquoi |
 |---|---|---|
-| Dossiers du projet | `2750` | setgid : le groupe `www-data` est hérité, Nginx lit sans intervention |
-| Fichiers | `0640` | Nginx lit via le groupe, aucun autre compte local ne voit rien |
+| Dossiers du projet | `2750` | setgid : le groupe **du site** (`jeiko-<site>`) est hérité ; Nginx en est membre |
+| Fichiers | `0640` | Nginx lit via le groupe ; les autres sites, comme tout autre compte local, ne voient rien |
 | `.env` | `0600` | contient `DB_PASS`, jamais lisible par le groupe |
 | `venv/bin/*` | `0750` | exécutable par le site uniquement |
-| Socket Gunicorn | `0660` | **exception** : Nginx doit pouvoir y écrire pour s'y connecter |
+| Socket Gunicorn | `0660` | **exception** : Nginx doit pouvoir y écrire pour s'y connecter (groupe du site) |
+| Cache (memcached) | socket `0600` | une instance par site (`jeiko-memcached-<site>`), sous son compte : aucun autre site ne la joint |
 
 Le socket étant nécessairement inscriptible par le groupe, `settings.py` force
 `FILE_UPLOAD_PERMISSIONS = 0o640` : les fichiers uploadés ne dépendent pas du
@@ -430,7 +421,8 @@ Le rollback est automatique. Pour le forcer :
 ```bash
 sudo systemctl status gunicorn-monsite
 sudo tail -50 /var/log/gunicorn/monsite/error.log
-ls -l /run/gunicorn-monsite/gunicorn.sock   # doit être en 0660, groupe www-data
+ls -l /run/gunicorn-monsite/gunicorn.sock   # doit être en 0660, groupe jeiko-monsite
+id -nG www-data                             # nginx doit être membre de jeiko-monsite
 ```
 
 **Le site boucle en redirection**
