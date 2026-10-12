@@ -53,6 +53,8 @@ le client réaligne le fichier, sans terminal.
 
 - Debian 12, utilisateur avec `sudo`
 - Ports 22, 80, 443 ouverts
+- Pour la visio, ouverts par l'installeur lui-même : 7881/tcp et 7882/udp (son
+  et image), 3478/udp et 5349/tcp (relais pour les réseaux filtrés)
 - Un domaine pointant vers le VPS (obligatoire si tu actives TLS)
 
 ---
@@ -233,6 +235,29 @@ migrations relèvent de la **maj client** (`--with-client` ou
 `jeiko-client-update`). En clair : **maj serveur + maj client = tout à jour** ;
 la maj serveur seule ne suffit que pour de la configuration serveur pure.
 
+### Plusieurs sites sur une machine : les ressources de chacun
+
+Sur une machine qui héberge plusieurs sites, chacun a ses ressources, écrites
+dans sa fiche (`/etc/jeiko/sites/<site>.conf`, root seul) et appliquées par la
+convergence :
+
+```bash
+sudo jeiko-server-update monsite --workers 2 --retention 14 --quota-medias 2
+sudo jeiko-server-update monsite --workers auto    # revenir au calcul par défaut
+```
+
+| Réglage | Par défaut | Effet |
+|---|---|---|
+| `--workers N` (1 à 12) | premier site : 2 × cœurs + 1, plafonné par la RAM ; site suivant : **2** | workers gunicorn du site |
+| `--retention JOURS` (1 à 365) | 30 | sauvegardes quotidiennes gardées sur la machine (chacune contient TOUS les médias) |
+| `--quota-medias GO` (1 à 1000) | aucun | `jeiko-verifier` alerte au-delà ; rien n'est bloqué |
+
+Sans réglage, un nouveau site installé sur une machine qui en porte déjà un
+reçoit 2 workers : le calcul par cœurs donnerait à chaque site les workers
+d'un serveur entier. Les sauvegardes locales ne protègent pas de la perte de
+la machine : configurer une copie hors serveur (`JEIKO_OFFSITE_TARGET`, voir
+« Sauvegardes »).
+
 ### La mise à jour automatique — `jeiko-maj`
 
 Chaque site peut cocher **« Mise à jour automatique »** (Mises à jour ▸
@@ -267,6 +292,22 @@ sudo jeiko-maj --hebdo --sans-limite # la passe complète, hors de la fenêtre
 
 État lu par les administrations : `/var/lib/jeiko/maj-serveur.state`. Journal
 complet (il nomme tous les sites) : `/var/log/jeiko/maj-serveur.log`, root seul.
+
+---
+
+## La visio
+
+Chaque installation et chaque convergence (`jeiko-server-update`, donc aussi
+`jeiko-maj`) posent le serveur de visio LiveKit, la clé du site dans son
+`.env`, le relais nginx `https://<domaine>/visio-rtc/` et les ports du
+pare-feu. Rien à lancer à la main : la visio s'active depuis l'administration
+du site (Réglages › Général › module « Conférence »). 50 personnes au plus par
+séance ; pas d'enregistrement.
+
+```bash
+systemctl status livekit        # le service
+journalctl -u livekit -n 50     # son journal
+```
 
 ---
 
@@ -374,6 +415,9 @@ Le script de publication, lui, vit avec le dossier de publication :
 | `/var/lib/jeiko/<site>/update.state` | état lu par l'administration | `0640 root:<site>` |
 | `/var/log/jeiko/<site>/update.log` | journal de mise à jour | `0640 root:<site>` |
 | `/etc/sudoers.d/jeiko-<site>` | 3 commandes autorisées, rien d'autre | `0440 root:root` |
+| `/usr/local/bin/livekit-server` | serveur de visio LiveKit (version fixée, empreinte vérifiée) | `0755 root:root` |
+| `/etc/livekit/livekit.yaml` | sa configuration, réécrite à chaque convergence | `0640 root:livekit` |
+| `/etc/livekit/keys.yaml` | les clés de visio des sites de la machine | `0600 livekit:livekit` |
 
 ### Modèle de permissions
 
