@@ -298,15 +298,17 @@ complet (il nomme tous les sites) : `/var/log/jeiko/maj-serveur.log`, root seul.
 ## La visio
 
 Chaque installation et chaque convergence (`jeiko-server-update`, donc aussi
-`jeiko-maj`) posent le serveur de visio LiveKit, la clé du site dans son
-`.env`, le relais nginx `https://<domaine>/visio-rtc/` et les ports du
-pare-feu. Rien à lancer à la main : la visio s'active depuis l'administration
-du site (Réglages › Général › module « Conférence »). 50 personnes au plus par
+`jeiko-maj`) posent le serveur de visio LiveKit DU SITE — chaque site a le
+sien, avec sa seule clé et ses propres ports —, la clé dans son `.env`, le
+relais nginx `https://<domaine>/visio-rtc/` et les ports du pare-feu. Rien à
+lancer à la main : la visio s'active depuis l'administration du site
+(Réglages › Général › module « Conférence »). 50 personnes au plus par
 séance ; pas d'enregistrement.
 
 ```bash
-systemctl status livekit        # le service
-journalctl -u livekit -n 50     # son journal
+systemctl status livekit@monsite        # le service du site
+journalctl -u livekit@monsite -n 50     # son journal
+cat /var/lib/jeiko/visio-rangs/monsite  # son rang : ports 7880+10×rang…
 ```
 
 ---
