@@ -64,11 +64,19 @@ le client réaligne le fichier, sans terminal.
 ```bash
 sudo apt-get update -y && sudo apt-get install -y curl unzip
 sudo mkdir -p /var/www && cd /var/www
-sudo curl -fL -o jeiko-installer.zip \
-  https://raw.githubusercontent.com/gderouineau/jeiko_installer/main/jeiko-installer-latest.zip
-sudo unzip -o jeiko-installer.zip -d jeiko-installer
-cd jeiko-installer && sudo chmod +x install.sh && sudo ./install.sh
+D=https://raw.githubusercontent.com/gderouineau/jeiko_installer/main
+M="$(curl -fsSL "$D/version.json")"
+A="$(printf '%s' "$M" | sed -n 's/.*"archive": *"\(jeiko-installer-v[0-9.]*\.zip\)".*/\1/p')"
+S="$(printf '%s' "$M" | sed -n 's/.*"sha256": *"\([0-9a-f]\{64\}\)".*/\1/p')"
+sudo curl -fL -o jeiko-installer.zip "$D/$A"
+echo "$S  jeiko-installer.zip" | sha256sum -c - \
+  && sudo unzip -o jeiko-installer.zip -d jeiko-installer \
+  && cd jeiko-installer && sudo chmod +x install.sh && sudo ./install.sh
 ```
+
+L'archive est celle que nomme `version.json`, et son empreinte est vérifiée
+AVANT d'être extraite : une archive tronquée, ou différente de celle qui a été
+publiée, s'arrête à « FAILED » sans rien installer.
 
 L'installeur pose les questions, affiche un récapitulatif, puis enchaîne les
 étapes `00` à `14`. Chaque étape est idempotente : en cas d'échec, corrige la
@@ -161,11 +169,15 @@ sinon la convergence rejoue les anciens gabarits :
 ```bash
 sudo apt-get install -y curl unzip
 cd /var/www
-sudo curl -fL -o jeiko-installer.zip \
-  https://raw.githubusercontent.com/gderouineau/jeiko_installer/main/jeiko-installer-latest.zip
-sudo unzip -o jeiko-installer.zip -d jeiko-installer
-cd jeiko-installer
-sudo ./migrate_site.sh --tools-only    # dépose les nouveaux gabarits/scripts, sans toucher aux sites
+D=https://raw.githubusercontent.com/gderouineau/jeiko_installer/main
+M="$(curl -fsSL "$D/version.json")"
+A="$(printf '%s' "$M" | sed -n 's/.*"archive": *"\(jeiko-installer-v[0-9.]*\.zip\)".*/\1/p')"
+S="$(printf '%s' "$M" | sed -n 's/.*"sha256": *"\([0-9a-f]\{64\}\)".*/\1/p')"
+sudo curl -fL -o jeiko-installer.zip "$D/$A"
+echo "$S  jeiko-installer.zip" | sha256sum -c - \
+  && sudo unzip -o jeiko-installer.zip -d jeiko-installer \
+  && cd jeiko-installer \
+  && sudo ./migrate_site.sh --tools-only    # dépose les nouveaux gabarits/scripts, sans toucher aux sites
 ```
 
 Un site jamais amorcé sur ce schéma (installé avant l'installeur v2) :
@@ -191,16 +203,24 @@ attendre une configuration serveur qui n'existe pas encore. Le message dit quoi
 faire (Mises à jour ▸ Serveur, ou `sudo jeiko-maj --serveur monsite`).
 `--ignorer-serveur` lève ce contrôle, en terminal seulement.
 
-Déroulé : manifeste → vérification sha256 (paquet et dépendances) → relevé
-des dépendances → installation → maintenance → dump PostgreSQL → réalignement de
-`settings.py` et `urls.py` → `django check` → migrations → collectstatic →
-permissions → redémarrage → contrôle de santé → tâches planifiées. **Toute
-erreur dès l'installation déclenche un retour arrière** (dépendances d'avant et
-wheel de la version installée réinstallés, gabarits restaurés, base restaurée
-si les migrations avaient tourné, statiques recollectés). Un retour arrière
-qui n'aboutit pas entièrement le dit.
+Déroulé : manifeste → vérification sha256 (paquet et dépendances) → Python
+minimum → **préparation d'un nouvel environnement à côté** (`venv.next` : le
+paquet et ses dépendances, site ouvert, l'environnement vivant intact) →
+maintenance → dump PostgreSQL → **bascule** (deux renommages ; l'ancien
+environnement est gardé en `venv.precedent`) → réalignement de `settings.py`
+et `urls.py` → `django check` → migrations → collectstatic → permissions →
+redémarrage → contrôle de santé → tâches planifiées.
 
-Le paquet s'installe site ouvert. Ensuite, du dump au redémarrage, le site
+Un échec pendant la préparation ne coûte rien : le nouvel environnement est
+jeté, le site n'a rien vu. **Après la bascule, toute erreur déclenche un
+retour arrière** : l'environnement d'avant reprend sa place d'un renommage —
+mêmes dépendances, même paquet, sans réseau —, gabarits restaurés, base
+restaurée si les migrations avaient tourné, statiques recollectés. Un retour
+arrière qui n'aboutit pas entièrement le dit. (Un site dont le venv vit hors
+de son dossier de projet s'installe sur place, avec le wheel de la version
+installée pour filet.)
+
+Le paquet se prépare site ouvert. Ensuite, du dump au redémarrage, le site
 passe en maintenance : ses tâches planifiées sont suspendues et nginx affiche
 sa page « indisponible » — rien ne s'écrit dans une base qu'un retour arrière
 pourrait restaurer. Les webhooks refusés pendant ce temps (Stripe) sont
@@ -323,15 +343,38 @@ sudo jeiko-restore monsite /var/backups/jeiko/monsite/daily/<horodatage>
 ```
 
 Chaque sauvegarde contient un dump PostgreSQL (vérifié par `pg_restore --list`),
-les médias, les fichiers de configuration et leurs empreintes. Rétention :
-30 jours. La copie hors site (`JEIKO_OFFSITE_TARGET` dans la fiche) chiffre
+les médias, les fichiers de configuration, un `MANIFESTE` (la version du paquet
+qui a produit la base) et leurs empreintes. Elle ne commence pas si la place
+manque sur le disque. Rétention : 30 jours. La copie hors site (`JEIKO_OFFSITE_TARGET` dans la fiche) chiffre
 avant l'envoi si une phrase secrète est configurée ; si elle ne peut pas
 chiffrer, elle n'envoie rien et la sauvegarde locale reste.
 
 `jeiko-restore` vérifie l'archive avant d'arrêter le site, arrête aussi ses
-tâches planifiées, puis restaure **la base et les médias**. La configuration
-reste dans `config.tar.gz` pour une reprise à la main ; le code garde sa
-version installée.
+tâches planifiées, puis restaure **la base et les médias** et lance `migrate`.
+Une base produite par un paquet plus récent que celui installé est refusée :
+mettre d'abord le paquet à jour (ou `--force`). `--avec-config` remet aussi le
+`.env` du site (l'ancien est gardé en `.env.avant-restauration`) ; la fiche et
+le vhost restent dans `config.tar.gz`.
+
+La désinstallation (`sudo ./uninstall.sh <site>`) garde les sauvegardes du
+site — `--purge-backups` pour les effacer — et ne supprime son compte Unix que
+s'il n'appartient qu'à lui.
+
+---
+
+## Changer le domaine d'un site
+
+```bash
+sudo jeiko-changer-domaine monsite nouveau-domaine.fr --dry-run   # vérifie sans rien changer
+sudo jeiko-changer-domaine monsite nouveau-domaine.fr
+```
+
+Il vérifie d'abord que le domaine est bien formé, qu'aucun autre site du
+serveur ne le sert, et — en HTTPS — qu'il résout déjà (www compris pour un
+domaine nu). Puis il met à jour la fiche et le `.env` du site et reconverge :
+vhost, certificat, visio. En cas d'échec, l'ancien domaine est remis. Restent
+à faire dans l'administration du site : l'adresse dans Réglages › Identité, et
+les clés d'accès (passkeys), liées à l'ancien domaine.
 
 ---
 
@@ -366,6 +409,11 @@ Installe la clé, coupe l'authentification par mot de passe, vérifie la
 configuration **avant** de recharger — si le test échoue, rien n'est appliqué —
 puis contrôle avec `sshd -T` ce que sshd applique réellement. Garder une
 session ouverte et essayer une nouvelle connexion avant de la fermer.
+
+Si « garder le mot de passe » a été choisi à l'installation, ce choix reste
+mémorisé dans `/etc/jeiko/keep-password-auth` : l'installation d'un site
+suivant rétablira le mot de passe, et `jeiko-ssh-key` le rappelle. Supprimer ce
+fichier pour que la coupure dure.
 
 ---
 
