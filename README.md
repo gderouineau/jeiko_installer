@@ -378,6 +378,25 @@ les clés d'accès (passkeys), liées à l'ancien domaine.
 
 ---
 
+## L'IPv6 du serveur
+
+Chaque domaine doit viser ce serveur, IPv6 comprise : Let's Encrypt passe par
+l'IPv6 quand la zone DNS a un enregistrement AAAA. Certains hébergeurs (OVH)
+attribuent une IPv6 au VPS et publient un AAAA vers elle, sans que l'adresse
+soit activée sur la machine. L'installeur le reconnaît et propose de
+l'activer ; sur un serveur déjà en place :
+
+```bash
+sudo jeiko-ipv6              # dit l'état, ne change rien
+sudo jeiko-ipv6 --activer    # active l'IPv6 attribuée par l'hébergeur
+```
+
+L'adresse est d'abord activée à chaud, gardée seulement si la passerelle
+répond, puis écrite pour les démarrages suivants ; l'IPv4 n'est pas touchée.
+Sans IPv6 attribuée, la zone DNS ne doit pas avoir de AAAA (domaine et www).
+
+---
+
 ## Surveillance
 
 ```bash
