@@ -1,6 +1,6 @@
 # JEIKO Installer v2
 
-Installe et maintient un site JEIKO sur Debian 12 : Django + Gunicorn + Nginx +
+Installe et maintient un site JEIKO sur Debian ou Ubuntu : Django + Gunicorn + Nginx +
 PostgreSQL + Memcached, avec TLS, sauvegardes et mise à jour depuis l'interface
 d'administration.
 
@@ -51,7 +51,10 @@ le client réaligne le fichier, sans terminal.
 
 ## Prérequis
 
-- Debian 12, utilisateur avec `sudo`
+- Debian 12 ou 13, ou Ubuntu 22.04, 24.04 ou 26.04 LTS ; utilisateur avec
+  `sudo`. Toute autre distribution est refusée juste après le choix de la
+  langue, avant la moindre question ou modification ; une version plus
+  récente que celles-ci est acceptée, avec un avertissement.
 - Ports 22, 80, 443 ouverts
 - Pour la visio, ouverts par l'installeur lui-même : 7881/tcp et 7882/udp (son
   et image), 3478/udp et 5349/tcp (relais pour les réseaux filtrés)
@@ -295,7 +298,7 @@ cochée :
    chaque site coché, s'il est en retard, avec ses timers. Un site en échec
    revient à son état d'avant et n'arrête pas les autres.
 
-Rien ne commence après 03:45 (le redémarrage automatique de Debian tombe à
+Rien ne commence après 03:45 (le redémarrage automatique du système tombe à
 04:20) : ce qui n'est pas atteint passe la semaine suivante. Une passe
 interrompue reprend là où elle s'est arrêtée — chaque site garde la version de
 l'installeur avec laquelle il a été convergé.
@@ -375,6 +378,59 @@ domaine nu). Puis il met à jour la fiche et le `.env` du site et reconverge :
 vhost, certificat, visio. En cas d'échec, l'ancien domaine est remis. Restent
 à faire dans l'administration du site : l'adresse dans Réglages › Identité, et
 les clés d'accès (passkeys), liées à l'ancien domaine.
+
+---
+
+## Changer le mot de passe d'un compte
+
+```bash
+sudo jeiko-mot-de-passe monsite                  # liste les comptes d'administration, puis demande
+sudo jeiko-mot-de-passe monsite gerant@exemple.fr
+```
+
+Pour quand « mot de passe oublié » ne peut pas servir (le site ne sait pas
+encore envoyer d'e-mail, l'adresse n'est plus lue). Le mot de passe est
+demandé deux fois, sans écho, et n'apparaît nulle part. Il suit les règles de
+mot de passe du site ; l'adresse du compte est confirmée si la connexion
+l'exige ; les sessions ouvertes sur ce compte sont fermées, le changement entre
+au journal de sécurité et le titulaire en est prévenu par e-mail. Un compte
+désactivé ou protégé par la double authentification le reste.
+
+---
+
+## Déménager un site vers un autre serveur
+
+Le serveur d'arrivée a l'installeur et son outillage (`migrate_site.sh
+--tools-only`, voir plus haut). Puis :
+
+```bash
+# 1. Sur le serveur de départ : une sauvegarde neuve, le certificat, la fiche
+sudo jeiko-transferer exporter monsite
+# 2. Depuis ton poste : l'archive d'un serveur à l'autre
+scp -3 debian@depart:monsite-transfert-<date>.tar debian@arrivee:
+# 3. Sur le serveur d'arrivée : vérifier, puis poser
+sudo jeiko-transferer importer monsite-transfert-<date>.tar --dry-run
+sudo jeiko-transferer importer monsite-transfert-<date>.tar
+```
+
+L'import vérifie tout avant de poser quoi que ce soit : l'archive (empreintes,
+rien que des fichiers), qu'aucun site, dossier, base ou domaine du même nom
+n'existe déjà ici, que le paquet publié n'est pas plus ancien que la base.
+Puis il installe le site (étapes de l'installeur), remet son `.env`, converge,
+et restaure la base et les médias. Le site garde ses comptes, ses contenus, ses
+réglages et ses secrets.
+
+Le domaine peut rester le même : le certificat HTTPS suit, le site répond sur
+le nouveau serveur avant que le DNS y pointe, et la bascule se fait sans
+coupure. Pour en changer en même temps : `--domaine nouveau-domaine.fr` (il
+doit déjà pointer vers le serveur d'arrivée) — c'est `jeiko-changer-domaine`
+qui s'en charge, à la fin.
+
+Restent à la main : la bascule DNS ; le retrait du site de l'ancien serveur une
+fois le nouveau vérifié (`sudo ./uninstall.sh monsite`) — ce qui y a été écrit
+après l'export ne suit pas, d'où un export au dernier moment ; la copie hors
+site et les alertes du nouveau serveur. L'archive contient la base et les
+secrets du site : l'effacer des deux serveurs une fois le transfert fait.
 
 ---
 
